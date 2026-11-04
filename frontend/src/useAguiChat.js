@@ -1,192 +1,470 @@
-import { useState, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+
+const INITIAL_CODING_STATE = {
+  active: false,
+  visible: false,
+  status: 'NOT_STARTED',
+  language: 'python',
+  code: '',
+  question: null,
+  questionRevision: 0,
+};
 
 export default function useAguiChat(baseUrl, threadId) {
   const [messages, setMessages] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editorTask, setEditorTask] = useState('');
-  const [editorInitialCode, setEditorInitialCode] = useState('');
-  const [editorLanguage, setEditorLanguage] = useState('python');
+  const [sessionId, setSessionId] = useState(null);
+  const [codingState, setCodingState] = useState(INITIAL_CODING_STATE);
+
+  const messagesRef = useRef([]);
+  const sessionIdRef = useRef(null);
+  const codingStateRef = useRef(INITIAL_CODING_STATE);
   const abortRef = useRef(null);
+  const backgroundAbortRef = useRef(null);
+  const requestInFlightRef = useRef(null);
   const toolCallBufferRef = useRef({});
-  const interviewStateRef = useRef({
-    questions_asked: 0,
-    coding_confirmation_pending: false,
-    coding_round_active: false,
-  });
+  const snapshotTimerRef = useRef(null);
+  const inactivityTimerRef = useRef(null);
+  const lastCodeTimeRef = useRef(Date.now());
+  const lastInactivityActivityRef = useRef(null);
 
-  const sendMessage = useCallback(
-    async (userText, editorContent, history) => {
-      if (!userText || !userText.trim()) return;
-      setIsStreaming(true);
+  const updateMessages = useCallback((updater) => {
+    setMessages((current) => {
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      messagesRef.current = next;
+      return next;
+    });
+  }, []);
 
-      const runId = 'run_' + crypto.randomUUID();
-      const assistantId = 'assistant_' + runId;
-      const userId = 'user_' + crypto.randomUUID();
+  const updateCodingState = useCallback((updater) => {
+    setCodingState((current) => {
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      codingStateRef.current = next;
+      return next;
+    });
+  }, []);
 
-      const interviewState = interviewStateRef.current;
+  const setCurrentSessionId = useCallback((nextSessionId) => {
+    if (!nextSessionId) return;
+    sessionIdRef.current = nextSessionId;
+    setSessionId(nextSessionId);
+  }, []);
 
-      const input = {
-        threadId: threadId,
-        runId: runId,
-        state: { 
-          editorContent: editorContent || '', 
-          editorOpen: editorOpen,
-          interviewState: interviewState
-        },
-        messages: [
-          ...(history || []),
-          { id: userId, role: 'user', content: userText },
-        ],
-        tools: [],
-        context: [],
-        forwardedProps: {},
+  const applySessionState = useCallback((eventState) => {
+    if (!eventState) return;
+    setCurrentSessionId(eventState.sessionId);
+
+    const serverState = eventState.interviewState;
+    if (!serverState || typeof serverState !== 'object') return;
+
+    updateCodingState((current) => {
+      const active = Boolean(serverState.coding_round_active);
+      const incomingRevision = serverState.question_revision ?? current.questionRevision;
+      const canApplyQuestion = incomingRevision >= current.questionRevision;
+
+      return {
+        ...current,
+        active,
+        visible: active ? current.visible : false,
+        status: serverState.status || current.status,
+        language: serverState.selected_language || current.language,
+        question: canApplyQuestion
+          ? (serverState.current_question || current.question)
+          : current.question,
+        questionRevision: Math.max(current.questionRevision, incomingRevision),
       };
+    });
+  }, [setCurrentSessionId, updateCodingState]);
 
-      setMessages((prev) => [
-        ...prev,
-        { id: userId, role: 'user', content: userText, streaming: false },
-        { id: assistantId, role: 'assistant', content: '', streaming: true },
-      ]);
+  const applyToolCall = useCallback((name, args) => {
+    if (name === 'open_editor') {
+      updateCodingState((current) => {
+        const questionId = args.question_id || current.question?.question_id || null;
+        const incomingRevision = args.question_revision ?? current.questionRevision;
+        if (incomingRevision < current.questionRevision) return current;
 
-      const controller = new AbortController();
-      abortRef.current = controller;
+        const isNewQuestion = Boolean(questionId && questionId !== current.question?.question_id);
+        const replaceCode = args.replace_code === true
+          || (args.replace_code !== false && (isNewQuestion || !current.question));
+        const question = {
+          ...(isNewQuestion ? {} : current.question),
+          question_id: questionId,
+          question_text: args.task || current.question?.question_text || '',
+          concept: args.concept || current.question?.concept || '',
+          difficulty: args.difficulty || current.question?.difficulty || '',
+          starter_code: args.initial_code || '',
+          language: args.language || current.language,
+        };
 
-      try {
-        const response = await fetch(baseUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'text/event-stream',
-          },
-          body: JSON.stringify(input),
-          signal: controller.signal,
-        });
-
-        if (!response.ok || !response.body) {
-          throw new Error('HTTP ' + response.status);
+        if (replaceCode) {
+          lastCodeTimeRef.current = Date.now();
+          lastInactivityActivityRef.current = null;
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+        return {
+          ...current,
+          active: true,
+          visible: true,
+          status: 'CODING_ACTIVE',
+          language: args.language || current.language,
+          code: replaceCode ? (args.initial_code || '') : current.code,
+          question,
+          questionRevision: Math.max(current.questionRevision, incomingRevision),
+        };
+      });
+    } else if (name === 'close_editor') {
+      updateCodingState((current) => ({
+        ...current,
+        active: false,
+        visible: false,
+        status: 'ENDED',
+      }));
+    }
+  }, [updateCodingState]);
 
-        while (true) {
-          if (controller.signal.aborted) break;
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+  const processToolChunk = useCallback((event) => {
+    const toolCallId = event.toolCallId;
+    if (!toolCallId) return;
 
-          const parts = buffer.split('\n\n');
-          buffer = parts.pop() || '';
+    const current = toolCallBufferRef.current[toolCallId] || {
+      name: '',
+      args: '',
+      applied: false,
+    };
+    if (event.toolCallName) current.name = event.toolCallName;
+    if (event.delta) current.args += event.delta;
+    toolCallBufferRef.current[toolCallId] = current;
 
-          for (const part of parts) {
-            const dataLine = part.split('\n').find((line) => line.startsWith('data: '));
-            if (!dataLine) continue;
-            try {
-              const event = JSON.parse(dataLine.slice(6));
+    if (!current.name || !current.args || current.applied) return;
+    try {
+      const args = JSON.parse(current.args);
+      current.applied = true;
+      applyToolCall(current.name, args);
+    } catch {
+      // Tool arguments can span multiple AG-UI chunks.
+    }
+  }, [applyToolCall]);
 
-              if (event.type === 'TEXT_MESSAGE_CHUNK' && event.delta) {
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === assistantId ? { ...m, content: m.content + event.delta } : m
-                  )
-                );
-              } else if (event.type === 'TOOL_CALL_CHUNK') {
-                const tcid = event.toolCallId;
-                if (tcid) {
-                  if (!toolCallBufferRef.current[tcid]) {
-                    toolCallBufferRef.current[tcid] = { name: '', args: '' };
-                  }
-                  if (event.toolCallName) {
-                    toolCallBufferRef.current[tcid].name = event.toolCallName;
-                  }
-                  if (event.delta) {
-                    toolCallBufferRef.current[tcid].args += event.delta;
-                  }
-                  const tc = toolCallBufferRef.current[tcid];
-                  if (tc.name && tc.args) {
-                    try {
-                      const args = JSON.parse(tc.args);
-                      if (tc.name === 'open_editor') {
-                        setEditorOpen(true);
-                        setEditorTask(args.task || '');
-                        setEditorInitialCode(args.initial_code || '');
-                        setEditorLanguage(args.language || 'python');
-                      } else if (tc.name === 'close_editor') {
-                        setEditorOpen(false);
-                        setEditorTask('');
-                        setEditorInitialCode('');
-                      }
-                    } catch (e) {
-                    }
-                  }
-                }
-              } else if (event.type === 'RUN_FINISHED') {
-                setMessages((prev) =>
-                  prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
-                );
-                setIsStreaming(false);
-                toolCallBufferRef.current = {};
-                
-                // Update interview state from response
-                if (event.state && event.state.interviewState) {
-                  interviewStateRef.current = {
-                    ...interviewStateRef.current,
-                    ...event.state.interviewState,
-                  };
-                }
-              } else if (event.type === 'RUN_ERROR') {
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.id === assistantId
-                      ? {
-                          ...m,
-                          content: m.content + '\n\n[Agent error: ' + event.message + ']',
-                          streaming: false,
-                        }
-                      : m
-                  )
-                );
-                setIsStreaming(false);
-                toolCallBufferRef.current = {};
-              }
-            } catch (e) {
-            }
+  const finishAssistantMessage = useCallback((assistantId) => {
+    if (!assistantId) return;
+    updateMessages((current) => current
+      .map((message) => (
+        message.id === assistantId ? { ...message, streaming: false } : message
+      ))
+      .filter((message) => message.id !== assistantId || message.content.trim())
+    );
+  }, [updateMessages]);
+
+  const consumeResponse = useCallback(async (response, { assistantId = null, signal = null } = {}) => {
+    if (!response.ok || !response.body) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const backgroundMessageId = assistantId || `assistant_${crypto.randomUUID()}`;
+    let backgroundMessageCreated = Boolean(assistantId);
+    let buffer = '';
+
+    while (true) {
+      if (signal?.aborted) break;
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const dataLine = part.split('\n').find((line) => line.startsWith('data: '));
+        if (!dataLine) continue;
+
+        const event = JSON.parse(dataLine.slice(6));
+        if (event.type === 'TEXT_MESSAGE_CHUNK' && event.delta) {
+          if (!backgroundMessageCreated) {
+            backgroundMessageCreated = true;
+            updateMessages((current) => [
+              ...current,
+              { id: backgroundMessageId, role: 'assistant', content: '', streaming: false },
+            ]);
           }
+          updateMessages((current) => current.map((message) => (
+            message.id === backgroundMessageId
+              ? { ...message, content: message.content + event.delta }
+              : message
+          )));
+        } else if (event.type === 'TOOL_CALL_CHUNK') {
+          processToolChunk(event);
+        } else if (event.type === 'RUN_FINISHED') {
+          applySessionState(event.state);
+          finishAssistantMessage(assistantId);
+        } else if (event.type === 'RUN_ERROR') {
+          throw new Error(event.message || 'Agent run failed');
         }
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-        setIsStreaming(false);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? {
-                  ...m,
-                  content: m.content + '\n\n[Connection error: ' + err.message + ']',
-                  streaming: false,
-                }
-              : m
-          )
-        );
       }
-    },
-    [baseUrl, threadId, editorOpen]
-  );
+    }
+
+    finishAssistantMessage(assistantId);
+  }, [applySessionState, finishAssistantMessage, processToolChunk, updateMessages]);
+
+  const buildInput = useCallback((runId, requestType, requestMessages) => {
+    const current = codingStateRef.current;
+    return {
+      threadId,
+      runId,
+      state: {
+        requestType,
+        editorContent: current.code,
+        editorOpen: current.active,
+        editorLanguage: current.language,
+        sessionId: sessionIdRef.current,
+        questionId: current.question?.question_id || null,
+        questionRevision: current.questionRevision,
+      },
+      messages: requestMessages,
+      tools: [],
+      context: [],
+      forwardedProps: {},
+    };
+  }, [threadId]);
+
+  const sendRequest = useCallback(async ({ requestType, requestMessages, assistantId, signal }) => {
+    const runId = `run_${crypto.randomUUID()}`;
+    const input = buildInput(runId, requestType, requestMessages);
+    const response = await fetch(baseUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(input),
+      signal,
+    });
+    await consumeResponse(response, { assistantId, signal });
+  }, [baseUrl, buildInput, consumeResponse]);
+
+  const beginForegroundRequest = useCallback(() => {
+    if (requestInFlightRef.current === 'foreground') return false;
+    if (requestInFlightRef.current === 'background') {
+      const backgroundController = backgroundAbortRef.current;
+      backgroundAbortRef.current = null;
+      backgroundController?.abort();
+    }
+    requestInFlightRef.current = 'foreground';
+    return true;
+  }, []);
+
+  const sendMessage = useCallback(async (userText) => {
+    const text = userText?.trim();
+    if (!text || !beginForegroundRequest()) return;
+
+    setIsStreaming(true);
+    toolCallBufferRef.current = {};
+
+    const userMessage = {
+      id: `user_${crypto.randomUUID()}`,
+      role: 'user',
+      content: text,
+      streaming: false,
+    };
+    const assistantId = `assistant_${crypto.randomUUID()}`;
+    const requestMessages = [
+      ...messagesRef.current
+        .filter((message) => message.content?.trim())
+        .map(({ id, role, content }) => ({ id, role, content })),
+      { id: userMessage.id, role: 'user', content: text },
+    ];
+
+    updateMessages((current) => [
+      ...current,
+      userMessage,
+      { id: assistantId, role: 'assistant', content: '', streaming: true },
+    ]);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      await sendRequest({
+        requestType: 'chat',
+        requestMessages,
+        assistantId,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        updateMessages((current) => current.map((message) => (
+          message.id === assistantId
+            ? { ...message, content: `${message.content}\n\n[Connection error: ${error.message}]`, streaming: false }
+            : message
+        )));
+      }
+    } finally {
+      requestInFlightRef.current = null;
+      setIsStreaming(false);
+      abortRef.current = null;
+      toolCallBufferRef.current = {};
+    }
+  }, [beginForegroundRequest, sendRequest, updateMessages]);
+
+  const sendBackgroundRequest = useCallback(async (requestType) => {
+    const current = codingStateRef.current;
+    if (
+      requestInFlightRef.current
+      || !sessionIdRef.current
+      || !current.active
+      || !current.question
+    ) return false;
+
+    const controller = new AbortController();
+    requestInFlightRef.current = 'background';
+    backgroundAbortRef.current = controller;
+    toolCallBufferRef.current = {};
+    try {
+      await sendRequest({
+        requestType,
+        requestMessages: messagesRef.current
+          .filter((message) => message.content?.trim())
+          .map(({ id, role, content }) => ({ id, role, content })),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        console.error(`${requestType} request failed:`, error);
+      }
+    } finally {
+      if (backgroundAbortRef.current === controller) {
+        backgroundAbortRef.current = null;
+        if (requestInFlightRef.current === 'background') {
+          requestInFlightRef.current = null;
+          toolCallBufferRef.current = {};
+        }
+      }
+    }
+    return true;
+  }, [sendRequest]);
+
+  const requestCodeReview = useCallback(async () => {
+    const current = codingStateRef.current;
+    if (!current.active || !current.question || !current.code.trim() || !beginForegroundRequest()) {
+      return;
+    }
+
+    setIsStreaming(true);
+    toolCallBufferRef.current = {};
+
+    const userMessage = {
+      id: `user_${crypto.randomUUID()}`,
+      role: 'user',
+      content: "I've completed my solution. Please review the latest editor code.",
+      streaming: false,
+    };
+    const assistantId = `assistant_${crypto.randomUUID()}`;
+    const requestMessages = [
+      ...messagesRef.current
+        .filter((message) => message.content?.trim())
+        .map(({ id, role, content }) => ({ id, role, content })),
+      { id: userMessage.id, role: 'user', content: userMessage.content },
+    ];
+
+    updateMessages((messages) => [
+      ...messages,
+      userMessage,
+      { id: assistantId, role: 'assistant', content: '', streaming: true },
+    ]);
+
+    try {
+      await sendRequest({ requestType: 'review', requestMessages, assistantId });
+    } catch (error) {
+      updateMessages((messages) => messages.map((message) => (
+        message.id === assistantId
+          ? { ...message, content: `[Review error: ${error.message}]`, streaming: false }
+          : message
+      )));
+    } finally {
+      requestInFlightRef.current = null;
+      setIsStreaming(false);
+      toolCallBufferRef.current = {};
+    }
+  }, [beginForegroundRequest, sendRequest, updateMessages]);
+
+  const stopTimers = useCallback(() => {
+    if (snapshotTimerRef.current) clearInterval(snapshotTimerRef.current);
+    if (inactivityTimerRef.current) clearInterval(inactivityTimerRef.current);
+    snapshotTimerRef.current = null;
+    inactivityTimerRef.current = null;
+  }, []);
+
+  const startTimers = useCallback(() => {
+    stopTimers();
+    lastCodeTimeRef.current = Date.now();
+    lastInactivityActivityRef.current = null;
+
+    snapshotTimerRef.current = setInterval(() => {
+      void sendBackgroundRequest('snapshot');
+    }, 60000);
+
+    inactivityTimerRef.current = setInterval(() => {
+      const activityMarker = lastCodeTimeRef.current;
+      if (
+        Date.now() - activityMarker >= 120000
+        && lastInactivityActivityRef.current !== activityMarker
+      ) {
+        void sendBackgroundRequest('inactivity').then((started) => {
+          if (started && lastCodeTimeRef.current === activityMarker) {
+            lastInactivityActivityRef.current = activityMarker;
+          }
+        });
+      }
+    }, 30000);
+  }, [sendBackgroundRequest, stopTimers]);
+
+  const setEditorCode = useCallback((code) => {
+    lastCodeTimeRef.current = Date.now();
+    lastInactivityActivityRef.current = null;
+    updateCodingState((current) => ({ ...current, code: code ?? '' }));
+  }, [updateCodingState]);
+
+  const setEditorLanguage = useCallback((language) => {
+    updateCodingState((current) => ({ ...current, language }));
+  }, [updateCodingState]);
+
+  const setEditorVisible = useCallback((nextValue) => {
+    updateCodingState((current) => ({
+      ...current,
+      visible: current.active
+        ? (typeof nextValue === 'function' ? nextValue(current.visible) : Boolean(nextValue))
+        : false,
+    }));
+  }, [updateCodingState]);
+
+  useEffect(() => () => {
+    stopTimers();
+    abortRef.current?.abort();
+    backgroundAbortRef.current?.abort();
+  }, [stopTimers]);
 
   return {
     messages,
-    setMessages,
     isStreaming,
     sendMessage,
-    editorOpen,
-    setEditorOpen,
-    editorTask,
-    editorInitialCode,
-    editorLanguage,
-    interviewState: interviewStateRef.current,
+    sessionId,
+    codingMode: codingState.active,
+    editorOpen: codingState.active && codingState.visible,
+    setEditorOpen: setEditorVisible,
+    editorTask: codingState.question?.question_text || '',
+    editorCode: codingState.code,
+    setEditorCode,
+    editorLanguage: codingState.language,
+    setEditorLanguage,
+    currentQuestion: codingState.question,
+    questionRevision: codingState.questionRevision,
+    interviewStatus: codingState.status,
+    startTimers,
+    stopTimers,
+    requestCodeReview,
     abort: () => {
-      if (abortRef.current) abortRef.current.abort();
+      abortRef.current?.abort();
+      backgroundAbortRef.current?.abort();
     },
   };
 }
