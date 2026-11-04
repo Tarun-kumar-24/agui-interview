@@ -115,9 +115,9 @@ export default function useAguiChat(baseUrl, threadId) {
     } else if (name === 'close_editor') {
       updateCodingState((current) => ({
         ...current,
-        active: false,
+        active: args.end_interview ? false : current.active,
         visible: false,
-        status: 'ENDED',
+        status: args.end_interview ? 'ENDED' : current.status,
       }));
     }
   }, [updateCodingState]);
