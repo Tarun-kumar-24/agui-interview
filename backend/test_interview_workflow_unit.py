@@ -208,6 +208,55 @@ class InterviewWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.last_code_content, latest_code)
         self.assertEqual(session.current_question.candidate_code, latest_code)
         self.assertIn("What value", text)
+        close_event = next(
+            event
+            for event in events
+            if event["type"] == "TOOL_CALL_CHUNK" and event["toolCallName"] == "close_editor"
+        )
+        self.assertFalse(json.loads(close_event["delta"])["end_interview"])
+
+    async def test_completion_message_hides_editor_without_ending_session(self):
+        session = session_manager.create_session("thread_complete_message")
+        session_manager.start_coding_session(session.session_id, "python")
+        session_manager.set_current_question(session.session_id, question())
+
+        original_decision = main.call_llm_for_decision
+
+        async def fake_decision(*_args, **_kwargs):
+            return {
+                "action": "RESPOND_TO_CANDIDATE",
+                "message": "I will review the solution you completed.",
+                "candidate_intent": "other",
+                "question_disposition": "continue",
+            }
+
+        main.call_llm_for_decision = fake_decision
+        try:
+            response = await main.run_agent(
+                make_request(
+                    input_payload(
+                        session.thread_id,
+                        "run_complete_message",
+                        [{"id": "u1", "role": "user", "content": "I have complete this"}],
+                        session_id=session.session_id,
+                        request_type="chat",
+                        code="def add(a, b):\n    return a + b",
+                        question_id=session.current_question_id,
+                        question_revision=session.question_revision,
+                    )
+                )
+            )
+            events = await response_events(response)
+        finally:
+            main.call_llm_for_decision = original_decision
+
+        close_event = next(
+            event
+            for event in events
+            if event["type"] == "TOOL_CALL_CHUNK" and event["toolCallName"] == "close_editor"
+        )
+        self.assertFalse(json.loads(close_event["delta"])["end_interview"])
+        self.assertEqual(session.status, InterviewStatus.CODING_ACTIVE)
 
     async def test_stale_revision_cannot_overwrite_current_question_code(self):
         session = session_manager.create_session("thread_stale")

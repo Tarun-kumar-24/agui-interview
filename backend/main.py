@@ -78,8 +78,13 @@ INTERVIEW_TOOLS = [
         "type": "function",
         "function": {
             "name": "close_editor",
-            "description": "Close Monaco when the coding interview ends.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": "Hide Monaco after a submission or close it when coding ends.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "end_interview": {"type": "boolean"},
+                },
+            },
         },
     },
     {
@@ -222,6 +227,21 @@ def _detect_coding_request(messages: list) -> bool:
             "lets code",
             "code now",
             "open editor",
+        )
+    )
+
+
+def _detect_completion_claim(messages: list) -> bool:
+    content = _latest_user_message(messages).lower().strip()
+    if not content or re.search(r"\b(not done|not complete|haven't completed|have not completed)\b", content):
+        return False
+    return any(
+        re.search(pattern, content)
+        for pattern in (
+            r"\bi(?:'m| am)?\s+(?:done|finished|complete)\b",
+            r"\bi have complete(?:d)?(?:\s+(?:this|it|the solution))?\b",
+            r"\b(?:this|it|the solution) is (?:done|finished|complete)\b",
+            r"\bfinished (?:this|it|the solution)\b",
         )
     )
 
@@ -665,7 +685,7 @@ async def _apply_dynamic_decision(
             code=current_code,
         )
         session_manager.end_interview(session.session_id)
-        return message, [("close_editor", {})]
+        return message, [("close_editor", {"end_interview": True})]
 
     if action == "END_INTERVIEW":
         return "", []
@@ -747,6 +767,8 @@ async def _handle_review(input_data: RunAgentInput, session) -> StreamingRespons
     text, tools = await _apply_dynamic_decision(session, decision, "CODE_REVIEW", review)
     if not text:
         text = str(review.get("feedback") or "")
+    if not any(name == "close_editor" for name, _ in tools):
+        tools.append(("close_editor", {"end_interview": False}))
     return _event_response(input_data, session, text=text, tools=tools)
 
 
@@ -779,6 +801,12 @@ async def _handle_coding_chat(input_data: RunAgentInput, session) -> StreamingRe
         + "Only replace after help is requested or the task is explicitly skipped/completed.",
     )
     text, tools = await _apply_dynamic_decision(session, decision, "CANDIDATE_MESSAGE")
+    completion_claimed = (
+        decision.get("candidate_intent") == "done"
+        or _detect_completion_claim(input_data.messages or [])
+    )
+    if completion_claimed and not any(name == "close_editor" for name, _ in tools):
+        tools.append(("close_editor", {"end_interview": False}))
     if not text and not tools:
         text = "I could not determine the next interview step. Please tell me what part you want help with."
     return _event_response(input_data, session, text=text, tools=tools)
