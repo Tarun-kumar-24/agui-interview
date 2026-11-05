@@ -1,5 +1,6 @@
 import { HttpAgent } from '@ag-ui/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import useEdgeTts from './useEdgeTts';
 
 const INITIAL_CODING_STATE = {
   active: false,
@@ -16,6 +17,16 @@ export default function useAguiChat(baseUrl, threadId) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessionId, setSessionId] = useState(null);
   const [codingState, setCodingState] = useState(INITIAL_CODING_STATE);
+  const {
+    enabled: voiceEnabled,
+    isSpeaking,
+    speakingMessageId,
+    beginTurn: beginSpeechTurn,
+    pushChunk: pushSpeechChunk,
+    flushMessage: flushSpeechMessage,
+    toggle: toggleVoice,
+    stop: stopSpeech,
+  } = useEdgeTts(baseUrl);
 
   const messagesRef = useRef([]);
   const sessionIdRef = useRef(null);
@@ -186,6 +197,10 @@ export default function useAguiChat(baseUrl, threadId) {
               ? { ...message, content: message.content + event.delta }
               : message
           )));
+          pushSpeechChunk(displayMessageId, event.delta);
+        },
+        onTextMessageEndEvent: () => {
+          flushSpeechMessage(displayMessageId);
         },
         onToolCallEndEvent: ({ toolCallName, toolCallArgs }) => {
           applyToolCall(toolCallName, toolCallArgs);
@@ -194,17 +209,20 @@ export default function useAguiChat(baseUrl, threadId) {
           applySessionState(event.snapshot);
         },
         onRunErrorEvent: ({ event }) => {
+          stopSpeech();
           runError = new Error(event.message || 'Agent run failed');
         },
         onRunFinishedEvent: () => {
+          flushSpeechMessage(displayMessageId);
           finishAssistantMessage(displayMessageId);
         },
       },
     );
 
     if (runError) throw runError;
+    flushSpeechMessage(displayMessageId);
     finishAssistantMessage(displayMessageId);
-  }, [applySessionState, applyToolCall, baseUrl, buildAgentState, finishAssistantMessage, threadId, updateMessages]);
+  }, [applySessionState, applyToolCall, baseUrl, buildAgentState, finishAssistantMessage, flushSpeechMessage, pushSpeechChunk, stopSpeech, threadId, updateMessages]);
 
   const beginForegroundRequest = useCallback(() => {
     if (requestInFlightRef.current === 'foreground') return false;
@@ -221,6 +239,7 @@ export default function useAguiChat(baseUrl, threadId) {
     const text = userText?.trim();
     if (!text || !beginForegroundRequest()) return;
 
+    beginSpeechTurn();
     setIsStreaming(true);
 
     const userMessage = {
@@ -253,6 +272,7 @@ export default function useAguiChat(baseUrl, threadId) {
         abortController: controller,
       });
     } catch (error) {
+      stopSpeech();
       if (error.name !== 'AbortError') {
         updateMessages((current) => current.map((message) => (
           message.id === assistantId
@@ -265,7 +285,7 @@ export default function useAguiChat(baseUrl, threadId) {
       setIsStreaming(false);
       abortRef.current = null;
     }
-  }, [beginForegroundRequest, sendRequest, updateMessages]);
+  }, [beginForegroundRequest, beginSpeechTurn, sendRequest, stopSpeech, updateMessages]);
 
   const sendBackgroundRequest = useCallback(async (requestType) => {
     const current = codingStateRef.current;
@@ -288,6 +308,7 @@ export default function useAguiChat(baseUrl, threadId) {
         abortController: controller,
       });
     } catch (error) {
+      stopSpeech();
       if (error.name !== 'AbortError') {
         console.error(`${requestType} request failed:`, error);
       }
@@ -300,7 +321,7 @@ export default function useAguiChat(baseUrl, threadId) {
       }
     }
     return true;
-  }, [sendRequest]);
+  }, [sendRequest, stopSpeech]);
 
   const requestCodeReview = useCallback(async () => {
     const current = codingStateRef.current;
@@ -308,6 +329,7 @@ export default function useAguiChat(baseUrl, threadId) {
       return;
     }
 
+    beginSpeechTurn();
     setIsStreaming(true);
 
     const userMessage = {
@@ -340,6 +362,7 @@ export default function useAguiChat(baseUrl, threadId) {
         abortController: controller,
       });
     } catch (error) {
+      stopSpeech();
       updateMessages((messages) => messages.map((message) => (
         message.id === assistantId
           ? { ...message, content: `[Review error: ${error.message}]`, streaming: false }
@@ -350,7 +373,7 @@ export default function useAguiChat(baseUrl, threadId) {
       setIsStreaming(false);
       abortRef.current = null;
     }
-  }, [beginForegroundRequest, sendRequest, updateMessages]);
+  }, [beginForegroundRequest, beginSpeechTurn, sendRequest, stopSpeech, updateMessages]);
 
   const stopTimers = useCallback(() => {
     if (snapshotTimerRef.current) clearInterval(snapshotTimerRef.current);
@@ -427,9 +450,14 @@ export default function useAguiChat(baseUrl, threadId) {
     startTimers,
     stopTimers,
     requestCodeReview,
+    voiceEnabled,
+    isSpeaking,
+    speakingMessageId,
+    toggleVoice,
     abort: () => {
       abortRef.current?.abort();
       backgroundAbortRef.current?.abort();
+      stopSpeech();
     },
   };
 }

@@ -6,7 +6,7 @@ const STARTER_PROMPTS = [
   'Can we start the coding round?',
 ];
 
-export default function ChatWindow({ messages, isStreaming, onSend }) {
+export default function ChatWindow({ messages, isStreaming, speakingMessageId, onSend }) {
   const [draft, setDraft] = useState('');
   const inputRef = useRef(null);
   const messageListRef = useRef(null);
@@ -83,11 +83,12 @@ export default function ChatWindow({ messages, isStreaming, onSend }) {
             const isAssistant = message.role === 'assistant';
             const isError = message.content?.includes('[Connection error:')
               || message.content?.includes('[Review error:');
+            const messageIsSpeaking = isAssistant && message.id === speakingMessageId;
 
             return (
               <article
                 key={message.id}
-                className={`message-row ${message.role} ${message.streaming ? 'streaming' : ''}`}
+                className={`message-row ${message.role} ${message.streaming ? 'streaming' : ''} ${messageIsSpeaking ? 'is-speaking' : ''}`}
               >
                 {isAssistant && (
                   <div className="message-avatar" aria-hidden="true">
@@ -95,7 +96,17 @@ export default function ChatWindow({ messages, isStreaming, onSend }) {
                   </div>
                 )}
                 <div className="message-stack">
-                  <span className="message-author">{isAssistant ? 'Interviewer' : 'You'}</span>
+                  <div className="message-meta">
+                    <span className="message-author">{isAssistant ? 'Interviewer' : 'You'}</span>
+                    {messageIsSpeaking && (
+                      <span className="speech-live" aria-label="This response is being spoken">
+                        <i />
+                        <i />
+                        <i />
+                        <em>Speaking</em>
+                      </span>
+                    )}
+                  </div>
                   <div className={`message ${message.role} ${isError ? 'error' : ''}`}>
                     {message.content ? (
                       <span className="message-copy">{message.content}</span>

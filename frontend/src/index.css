@@ -186,12 +186,43 @@ select:focus-visible,
 }
 
 .toggle-btn,
+.voice-toggle,
 .review-button,
 .starter-prompts button,
 .chat-input-wrapper button {
   border: 0;
   cursor: pointer;
   transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.voice-toggle {
+  display: flex;
+  height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.voice-toggle:hover {
+  border-color: rgba(31, 139, 91, 0.42);
+  color: var(--accent-soft);
+  transform: translateY(-1px);
+}
+
+.voice-toggle.is-enabled {
+  border-color: rgba(31, 139, 91, 0.28);
+  background: var(--accent-deep);
+  color: var(--accent-soft);
+}
+
+.voice-toggle.is-speaking svg {
+  animation: voiceIconPulse 900ms ease-in-out infinite;
 }
 
 .toggle-btn {
@@ -216,6 +247,7 @@ select:focus-visible,
 }
 
 .toggle-btn:active,
+.voice-toggle:active,
 .review-button:active,
 .starter-prompts button:active,
 .chat-input-wrapper button:active {
@@ -654,6 +686,14 @@ body.is-resizing * {
   gap: 6px;
 }
 
+.message-meta {
+  display: flex;
+  min-height: 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .message-row.user .message-stack {
   align-items: flex-end;
 }
@@ -693,6 +733,44 @@ body.is-resizing * {
   border-color: rgba(185, 87, 79, 0.28);
   background: var(--danger-deep);
   color: #762f2a;
+}
+
+.message-row.is-speaking .message.assistant {
+  border-color: rgba(31, 139, 91, 0.38);
+  box-shadow: 0 0 0 3px rgba(31, 139, 91, 0.07), 0 12px 30px rgba(44, 62, 50, 0.1);
+}
+
+.speech-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--accent-soft);
+}
+
+.speech-live i {
+  width: 2px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: speechBar 700ms ease-in-out infinite alternate;
+}
+
+.speech-live i:nth-child(2) {
+  height: 11px;
+  animation-delay: 120ms;
+}
+
+.speech-live i:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.speech-live em {
+  margin-left: 4px;
+  font-size: 0.56rem;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .message-copy {
@@ -869,6 +947,16 @@ body.is-resizing * {
   50% { opacity: 1; box-shadow: 0 0 0 6px rgba(31, 139, 91, 0.1); }
 }
 
+@keyframes speechBar {
+  from { transform: scaleY(0.55); opacity: 0.5; }
+  to { transform: scaleY(1); opacity: 1; }
+}
+
+@keyframes voiceIconPulse {
+  0%, 100% { transform: scale(0.92); }
+  50% { transform: scale(1.08); }
+}
+
 @keyframes messageIn {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
@@ -918,12 +1006,14 @@ body.is-resizing * {
 
   .brand-copy small,
   .run-status span,
+  .voice-toggle span,
   .toggle-btn span,
   .composer-status {
     display: none;
   }
 
-  .toggle-btn {
+  .toggle-btn,
+  .voice-toggle {
     width: 34px;
     justify-content: center;
     padding: 0;

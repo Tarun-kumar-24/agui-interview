@@ -1,5 +1,14 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Code, Bot, Minimize2, Maximize2, CheckCircle, AlertCircle } from 'lucide-react';
+import {
+  AlertCircle,
+  Bot,
+  CheckCircle,
+  Code,
+  Maximize2,
+  Minimize2,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import MonacoEditor from './MonacoEditor';
 import ChatWindow from './ChatWindow';
 import SplitPane from './SplitPane';
@@ -38,6 +47,10 @@ export default function App() {
     startTimers,
     stopTimers,
     requestCodeReview,
+    voiceEnabled,
+    isSpeaking,
+    speakingMessageId,
+    toggleVoice,
   } = useAguiChat(AGUI_URL, threadId);
 
   useEffect(() => {
@@ -65,8 +78,10 @@ export default function App() {
     }
   }, [editorCode, requestCodeReview]);
 
-  const statusLabel = isStreaming
-    ? 'Interviewer is responding'
+  const statusLabel = isSpeaking
+    ? 'Speaking response'
+    : isStreaming
+      ? 'Interviewer is responding'
     : (interviewStatus === 'NOT_STARTED' && messages.length
       ? 'Interview in progress'
       : (STATUS_LABELS[interviewStatus] || 'Connected'));
@@ -82,7 +97,17 @@ export default function App() {
           </span>
         </div>
         <div className="toolbar-actions">
-          <div className={`run-status ${isStreaming ? 'is-active' : ''}`}>
+          <button
+            className={`voice-toggle ${voiceEnabled ? 'is-enabled' : ''} ${isSpeaking ? 'is-speaking' : ''}`}
+            type="button"
+            onClick={toggleVoice}
+            aria-pressed={voiceEnabled}
+            title={voiceEnabled ? 'Turn interviewer voice off' : 'Turn interviewer voice on'}
+          >
+            {voiceEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
+            <span>{isSpeaking ? 'Speaking' : (voiceEnabled ? 'Voice on' : 'Voice off')}</span>
+          </button>
+          <div className={`run-status ${isStreaming || isSpeaking ? 'is-active' : ''}`}>
             <i />
             <span>{statusLabel}</span>
           </div>
@@ -174,6 +199,7 @@ export default function App() {
           <ChatWindow
             messages={messages}
             isStreaming={isStreaming}
+            speakingMessageId={speakingMessageId}
             onSend={handleSend}
           />
         </section>
