@@ -1,3 +1,4 @@
+import { HttpAgent } from '@ag-ui/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 const INITIAL_CODING_STATE = {
@@ -22,7 +23,6 @@ export default function useAguiChat(baseUrl, threadId) {
   const abortRef = useRef(null);
   const backgroundAbortRef = useRef(null);
   const requestInFlightRef = useRef(null);
-  const toolCallBufferRef = useRef({});
   const snapshotTimerRef = useRef(null);
   const inactivityTimerRef = useRef(null);
   const lastCodeTimeRef = useRef(Date.now());
@@ -122,29 +122,6 @@ export default function useAguiChat(baseUrl, threadId) {
     }
   }, [updateCodingState]);
 
-  const processToolChunk = useCallback((event) => {
-    const toolCallId = event.toolCallId;
-    if (!toolCallId) return;
-
-    const current = toolCallBufferRef.current[toolCallId] || {
-      name: '',
-      args: '',
-      applied: false,
-    };
-    if (event.toolCallName) current.name = event.toolCallName;
-    if (event.delta) current.args += event.delta;
-    toolCallBufferRef.current[toolCallId] = current;
-
-    if (!current.name || !current.args || current.applied) return;
-    try {
-      const args = JSON.parse(current.args);
-      current.applied = true;
-      applyToolCall(current.name, args);
-    } catch {
-      // Tool arguments can span multiple AG-UI chunks.
-    }
-  }, [applyToolCall]);
-
   const finishAssistantMessage = useCallback((assistantId) => {
     if (!assistantId) return;
     updateMessages((current) => current
@@ -155,93 +132,79 @@ export default function useAguiChat(baseUrl, threadId) {
     );
   }, [updateMessages]);
 
-  const consumeResponse = useCallback(async (response, { assistantId = null, signal = null } = {}) => {
-    if (!response.ok || !response.body) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+  const buildAgentState = useCallback((requestType) => {
+    const current = codingStateRef.current;
+    return {
+      requestType,
+      editorContent: current.code,
+      editorOpen: current.active,
+      editorLanguage: current.language,
+      sessionId: sessionIdRef.current,
+      questionId: current.question?.question_id || null,
+      questionRevision: current.questionRevision,
+    };
+  }, []);
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    const backgroundMessageId = assistantId || `assistant_${crypto.randomUUID()}`;
-    let backgroundMessageCreated = Boolean(assistantId);
-    let buffer = '';
+  const sendRequest = useCallback(async ({
+    requestType,
+    requestMessages,
+    assistantId,
+    abortController,
+  }) => {
+    const runId = `run_${crypto.randomUUID()}`;
+    let displayMessageId = assistantId;
+    let displayMessageCreated = Boolean(assistantId);
+    let runError = null;
 
-    while (true) {
-      if (signal?.aborted) break;
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    const agent = new HttpAgent({
+      url: baseUrl,
+      threadId,
+      initialMessages: requestMessages,
+      initialState: buildAgentState(requestType),
+    });
 
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
-
-      for (const part of parts) {
-        const dataLine = part.split('\n').find((line) => line.startsWith('data: '));
-        if (!dataLine) continue;
-
-        const event = JSON.parse(dataLine.slice(6));
-        if (event.type === 'TEXT_MESSAGE_CHUNK' && event.delta) {
-          if (!backgroundMessageCreated) {
-            backgroundMessageCreated = true;
+    await agent.runAgent(
+      {
+        runId,
+        tools: [],
+        context: [],
+        forwardedProps: {},
+        abortController,
+      },
+      {
+        onTextMessageContentEvent: ({ event }) => {
+          if (!displayMessageCreated) {
+            displayMessageId = event.messageId || `assistant_${crypto.randomUUID()}`;
+            displayMessageCreated = true;
             updateMessages((current) => [
               ...current,
-              { id: backgroundMessageId, role: 'assistant', content: '', streaming: false },
+              { id: displayMessageId, role: 'assistant', content: '', streaming: false },
             ]);
           }
           updateMessages((current) => current.map((message) => (
-            message.id === backgroundMessageId
+            message.id === displayMessageId
               ? { ...message, content: message.content + event.delta }
               : message
           )));
-        } else if (event.type === 'TOOL_CALL_CHUNK') {
-          processToolChunk(event);
-        } else if (event.type === 'RUN_FINISHED') {
-          applySessionState(event.state);
-          finishAssistantMessage(assistantId);
-        } else if (event.type === 'RUN_ERROR') {
-          throw new Error(event.message || 'Agent run failed');
-        }
-      }
-    }
-
-    finishAssistantMessage(assistantId);
-  }, [applySessionState, finishAssistantMessage, processToolChunk, updateMessages]);
-
-  const buildInput = useCallback((runId, requestType, requestMessages) => {
-    const current = codingStateRef.current;
-    return {
-      threadId,
-      runId,
-      state: {
-        requestType,
-        editorContent: current.code,
-        editorOpen: current.active,
-        editorLanguage: current.language,
-        sessionId: sessionIdRef.current,
-        questionId: current.question?.question_id || null,
-        questionRevision: current.questionRevision,
+        },
+        onToolCallEndEvent: ({ toolCallName, toolCallArgs }) => {
+          applyToolCall(toolCallName, toolCallArgs);
+        },
+        onStateSnapshotEvent: ({ event }) => {
+          applySessionState(event.snapshot);
+        },
+        onRunErrorEvent: ({ event }) => {
+          runError = new Error(event.message || 'Agent run failed');
+        },
+        onRunFinishedEvent: () => {
+          finishAssistantMessage(displayMessageId);
+        },
       },
-      messages: requestMessages,
-      tools: [],
-      context: [],
-      forwardedProps: {},
-    };
-  }, [threadId]);
+    );
 
-  const sendRequest = useCallback(async ({ requestType, requestMessages, assistantId, signal }) => {
-    const runId = `run_${crypto.randomUUID()}`;
-    const input = buildInput(runId, requestType, requestMessages);
-    const response = await fetch(baseUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'text/event-stream',
-      },
-      body: JSON.stringify(input),
-      signal,
-    });
-    await consumeResponse(response, { assistantId, signal });
-  }, [baseUrl, buildInput, consumeResponse]);
+    if (runError) throw runError;
+    finishAssistantMessage(displayMessageId);
+  }, [applySessionState, applyToolCall, baseUrl, buildAgentState, finishAssistantMessage, threadId, updateMessages]);
 
   const beginForegroundRequest = useCallback(() => {
     if (requestInFlightRef.current === 'foreground') return false;
@@ -259,7 +222,6 @@ export default function useAguiChat(baseUrl, threadId) {
     if (!text || !beginForegroundRequest()) return;
 
     setIsStreaming(true);
-    toolCallBufferRef.current = {};
 
     const userMessage = {
       id: `user_${crypto.randomUUID()}`,
@@ -288,7 +250,7 @@ export default function useAguiChat(baseUrl, threadId) {
         requestType: 'chat',
         requestMessages,
         assistantId,
-        signal: controller.signal,
+        abortController: controller,
       });
     } catch (error) {
       if (error.name !== 'AbortError') {
@@ -302,7 +264,6 @@ export default function useAguiChat(baseUrl, threadId) {
       requestInFlightRef.current = null;
       setIsStreaming(false);
       abortRef.current = null;
-      toolCallBufferRef.current = {};
     }
   }, [beginForegroundRequest, sendRequest, updateMessages]);
 
@@ -318,14 +279,13 @@ export default function useAguiChat(baseUrl, threadId) {
     const controller = new AbortController();
     requestInFlightRef.current = 'background';
     backgroundAbortRef.current = controller;
-    toolCallBufferRef.current = {};
     try {
       await sendRequest({
         requestType,
         requestMessages: messagesRef.current
           .filter((message) => message.content?.trim())
           .map(({ id, role, content }) => ({ id, role, content })),
-        signal: controller.signal,
+        abortController: controller,
       });
     } catch (error) {
       if (error.name !== 'AbortError') {
@@ -336,7 +296,6 @@ export default function useAguiChat(baseUrl, threadId) {
         backgroundAbortRef.current = null;
         if (requestInFlightRef.current === 'background') {
           requestInFlightRef.current = null;
-          toolCallBufferRef.current = {};
         }
       }
     }
@@ -350,7 +309,6 @@ export default function useAguiChat(baseUrl, threadId) {
     }
 
     setIsStreaming(true);
-    toolCallBufferRef.current = {};
 
     const userMessage = {
       id: `user_${crypto.randomUUID()}`,
@@ -372,8 +330,15 @@ export default function useAguiChat(baseUrl, threadId) {
       { id: assistantId, role: 'assistant', content: '', streaming: true },
     ]);
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      await sendRequest({ requestType: 'review', requestMessages, assistantId });
+      await sendRequest({
+        requestType: 'review',
+        requestMessages,
+        assistantId,
+        abortController: controller,
+      });
     } catch (error) {
       updateMessages((messages) => messages.map((message) => (
         message.id === assistantId
@@ -383,7 +348,7 @@ export default function useAguiChat(baseUrl, threadId) {
     } finally {
       requestInFlightRef.current = null;
       setIsStreaming(false);
-      toolCallBufferRef.current = {};
+      abortRef.current = null;
     }
   }, [beginForegroundRequest, sendRequest, updateMessages]);
 

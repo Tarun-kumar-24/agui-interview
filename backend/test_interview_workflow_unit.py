@@ -105,8 +105,10 @@ class InterviewWorkflowTests(unittest.IsolatedAsyncioTestCase):
             make_request(input_payload(thread_id, "run_1", first_messages))
         )
         first_events = await response_events(first_response)
-        finished = next(event for event in first_events if event["type"] == "RUN_FINISHED")
-        session_id = finished["state"]["sessionId"]
+        state_snapshot = next(
+            event for event in first_events if event["type"] == "STATE_SNAPSHOT"
+        )
+        session_id = state_snapshot["snapshot"]["sessionId"]
 
         original_generate = main.generate_question_llm
 

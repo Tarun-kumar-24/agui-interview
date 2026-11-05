@@ -18,6 +18,7 @@ from ag_ui.core import (
     RunErrorEvent,
     RunFinishedEvent,
     RunStartedEvent,
+    StateSnapshotEvent,
     TextMessageChunkEvent,
     ToolCallChunkEvent,
 )
@@ -39,6 +40,14 @@ load_dotenv(os.path.join(backend_dir, ".env"))
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODELS = (
+    [
+        model.strip()
+        for model in os.getenv("OPENAI_MODELS", OPENAI_MODEL).split(",")
+        if model.strip()
+    ]
+    or [OPENAI_MODEL]
+)
 
 http_client = httpx.AsyncClient(timeout=60.0)
 session_locks: dict[str, asyncio.Lock] = {}
@@ -152,6 +161,23 @@ CURRENT STATE:
 - Interview status: {status}
 - Selected language: {language}
 """
+
+
+def _model_request_fields(require_parameters: bool = False) -> dict:
+    """Use OpenRouter's cross-model failover while retaining generic OpenAI compatibility."""
+    if "openrouter.ai" not in OPENAI_BASE_URL or len(OPENAI_MODELS) == 1:
+        return {"model": OPENAI_MODELS[0]}
+
+    provider = {
+        "allow_fallbacks": True,
+        "sort": {"by": "latency", "partition": "none"},
+    }
+    if require_parameters:
+        provider["require_parameters"] = True
+    return {
+        "models": OPENAI_MODELS,
+        "provider": provider,
+    }
 
 
 def _message_value(message, field: str, default=""):
@@ -295,7 +321,7 @@ def _extract_json_object(text: str) -> dict:
 
 async def _json_completion(prompt: str, temperature: float) -> dict:
     payload = {
-        "model": OPENAI_MODEL,
+        **_model_request_fields(require_parameters=True),
         "messages": [{"role": "system", "content": prompt}],
         "stream": False,
         "temperature": temperature,
@@ -546,11 +572,16 @@ def _event_response(
             )
             return
         yield encoder.encode(
+            StateSnapshotEvent(
+                type=EventType.STATE_SNAPSHOT,
+                snapshot=final_state,
+            )
+        )
+        yield encoder.encode(
             RunFinishedEvent(
                 type=EventType.RUN_FINISHED,
                 thread_id=input_data.thread_id,
                 run_id=input_data.run_id,
-                state=final_state,
             )
         )
 
@@ -814,7 +845,7 @@ def _theoretical_chat_response(input_data: RunAgentInput, session) -> StreamingR
                 )
             )
             payload = {
-                "model": OPENAI_MODEL,
+                **_model_request_fields(),
                 "messages": messages,
                 "stream": True,
                 "temperature": 0.7,
@@ -858,11 +889,16 @@ def _theoretical_chat_response(input_data: RunAgentInput, session) -> StreamingR
             if "are you comfortable starting the coding round now" in assistant_text.lower():
                 session.coding_confirmation_pending = True
             yield encoder.encode(
+                StateSnapshotEvent(
+                    type=EventType.STATE_SNAPSHOT,
+                    snapshot=_state_payload(session),
+                )
+            )
+            yield encoder.encode(
                 RunFinishedEvent(
                     type=EventType.RUN_FINISHED,
                     thread_id=input_data.thread_id,
                     run_id=input_data.run_id,
-                    state=_state_payload(session),
                 )
             )
         except Exception as error:
