@@ -1,0 +1,7 @@
+=== RAW REQUEST ===
+{"threadId": "thread_test_early", "runId": "run_test_early_3", "state": {"editorContent": "", "editorOpen": false, "interviewState": {"questions_asked": 2, "coding_confirmation_pending": true, "coding_round_active": false}}, "messages": [{"id": "msg_1", "role": "user", "content": "Hello"}, {"id": "msg_2", "role": "assistant", "content": "Welcome! Tell me about your background."}, {"id": "msg_3", "role": "user", "content": "I have 3 years Python experience."}, {"id": "msg_4", "role": "assistant", "content": "Nice. What projects have you worked on?"}, {"id": "msg_5", "role": "user", "content": "I built a REST API."}, {"id": "msg_6", "role": "assistant", "content": "Good. How do you handle errors?"}, {"id": "msg_7", "role": "user", "content": "Try-catch and logging."}, {"id": "msg_8", "role": "user", "content": "Can we start the coding round?"}, {"id": "msg_9", "role": "assistant", "content": "Are you comfortable starting the coding round now?"}, {"id": "msg_10", "role": "user", "content": "Yes, let us start."}], "tools": [], "context": [], "forwardedProps": {}}
+===================
+DEBUG: editor_open=False, session=session_29582efd3397, session.status=InterviewStatus.NOT_STARTED, session.current_question=None, emit_open_editor_placeholder=True
+DEBUG: session_id before event_generator = session_29582efd3397
+DEBUG: session_id in event_generator = session_29582efd3397
+INFO:     127.0.0.1:55952 - "POST / HTTP/1.1" 200 OK
