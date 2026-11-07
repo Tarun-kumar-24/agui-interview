@@ -1,5 +1,14 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { Code, Bot, Minimize2, Maximize2, CheckCircle, AlertCircle } from 'lucide-react';
+import {
+  AlertCircle,
+  Bot,
+  CheckCircle,
+  Code,
+  Maximize2,
+  Minimize2,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import MonacoEditor from './MonacoEditor';
 import ChatWindow from './ChatWindow';
 import SplitPane from './SplitPane';
@@ -7,8 +16,18 @@ import useAguiChat from './useAguiChat';
 
 const AGUI_URL = import.meta.env.VITE_AGUI_URL || 'http://localhost:8000';
 
+const STATUS_LABELS = {
+  NOT_STARTED: 'Ready',
+  THEORETICAL: 'Interview in progress',
+  CODING_ACTIVE: 'Coding round',
+  WAITING_FOR_REVIEW: 'Ready for review',
+  REVIEWING: 'Reviewing code',
+  ENDED: 'Interview complete',
+};
+
 export default function App() {
   const [threadId] = useState(() => 'thread_' + crypto.randomUUID());
+  const [editorWidth, setEditorWidth] = useState(55);
 
   const {
     messages,
@@ -28,6 +47,10 @@ export default function App() {
     startTimers,
     stopTimers,
     requestCodeReview,
+    voiceEnabled,
+    isSpeaking,
+    speakingMessageId,
+    toggleVoice,
   } = useAguiChat(AGUI_URL, threadId);
 
   useEffect(() => {
@@ -55,58 +78,87 @@ export default function App() {
     }
   }, [editorCode, requestCodeReview]);
 
+  const statusLabel = isSpeaking
+    ? 'Speaking response'
+    : isStreaming
+      ? 'Interviewer is responding'
+    : (interviewStatus === 'NOT_STARTED' && messages.length
+      ? 'Interview in progress'
+      : (STATUS_LABELS[interviewStatus] || 'Connected'));
+
   return (
     <div className="app">
-      <div className="toolbar">
+      <header className="toolbar">
         <div className="toolbar-brand">
-          <Code size={20} />
-          <span>AG-UI Interview Agent</span>
+          <span className="brand-mark" aria-hidden="true"><Code size={18} /></span>
+          <span className="brand-copy">
+            <strong>Interview studio</strong>
+            <small>Adaptive technical assessment</small>
+          </span>
         </div>
         <div className="toolbar-actions">
+          <button
+            className={`voice-toggle ${voiceEnabled ? 'is-enabled' : ''} ${isSpeaking ? 'is-speaking' : ''}`}
+            type="button"
+            onClick={toggleVoice}
+            aria-pressed={voiceEnabled}
+            title={voiceEnabled ? 'Turn interviewer voice off' : 'Turn interviewer voice on'}
+          >
+            {voiceEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
+            <span>{isSpeaking ? 'Speaking' : (voiceEnabled ? 'Voice on' : 'Voice off')}</span>
+          </button>
+          <div className={`run-status ${isStreaming || isSpeaking ? 'is-active' : ''}`}>
+            <i />
+            <span>{statusLabel}</span>
+          </div>
           {codingMode && (
             <button
               className="toggle-btn"
               onClick={() => setEditorOpen((open) => !open)}
-              title={editorOpen ? 'Hide editor (chat only)' : 'Show active coding editor'}
+              title={editorOpen ? 'Hide editor and focus on chat' : 'Show active coding editor'}
             >
-              {editorOpen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-              <span>{editorOpen ? 'Hide Editor' : 'Show Editor'}</span>
+              {editorOpen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+              <span>{editorOpen ? 'Focus on chat' : 'Show code'}</span>
             </button>
           )}
         </div>
-      </div>
+      </header>
 
-      <div className="split-container">
+      <main
+        className={`split-container ${editorOpen ? 'has-editor' : 'chat-only'}`}
+        style={{ '--editor-width': `${editorWidth}%` }}
+      >
         {editorOpen && (
-          <div className="editor-panel">
+          <section className="editor-panel" aria-label="Coding workspace">
             <div className="panel-header">
-              <Code size={16} style={{ marginRight: 6 }} />
-              <span>Monaco Editor (Code)</span>
-              {editorTask && (
-                <div className="editor-task" style={{ marginLeft: 'auto', fontSize: 12, color: '#888', maxWidth: '400px', textAlign: 'right' }}>
-                  {editorTask.slice(0, 100)}...
+              <div className="panel-title">
+                <span className="panel-icon"><Code size={15} /></span>
+                <span>
+                  <strong>Code workspace</strong>
+                  <small>{editorLanguage}</small>
+                </span>
+              </div>
+              {currentQuestion && (
+                <div className="question-meta">
+                  {currentQuestion.concept && <span>{currentQuestion.concept}</span>}
+                  {currentQuestion.difficulty && <span>{currentQuestion.difficulty}</span>}
                 </div>
               )}
             </div>
 
-            {/* Problem Description Panel */}
             {(editorTask || currentQuestion) && (
-              <div className="problem-panel" style={{
-                padding: '12px 14px',
-                background: '#0b1120',
-                borderBottom: '1px solid #1e293b',
-                flexShrink: 0,
-              }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                  <AlertCircle size={16} style={{ color: '#fbbf24', flexShrink: 0, marginTop: 2 }} />
-                  <div style={{ flex: 1, fontSize: 13, lineHeight: 1.6, color: '#e2e8f0' }}>
-                    <strong style={{ color: '#fbbf24' }}>Current Task:</strong> {editorTask || currentQuestion?.question_text}
-                  </div>
+              <section className="problem-panel" aria-labelledby="current-task-title">
+                <div className="problem-marker" aria-hidden="true">
+                  <AlertCircle size={15} />
                 </div>
-              </div>
+                <div>
+                  <p className="eyebrow" id="current-task-title">Current task</p>
+                  <p>{editorTask || currentQuestion?.question_text}</p>
+                </div>
+              </section>
             )}
 
-            <div className="editor-wrapper" style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
+            <div className="editor-wrapper">
               <MonacoEditor
                 value={editorCode}
                 onChange={handleEditorChange}
@@ -114,58 +166,44 @@ export default function App() {
                 onLanguageChange={handleLanguageChange}
                 question={currentQuestion?.question_text || editorTask}
               />
-              {/* Review Button */}
-              <div style={{
-                padding: '8px 12px',
-                background: '#0b1120',
-                borderTop: '1px solid #1e293b',
-                flexShrink: 0,
-                display: 'flex',
-                justifyContent: 'flex-end',
-              }}>
+              <div className="review-bar">
+                <p><i /> Latest editor state will be reviewed</p>
                 <button
+                  className="review-button"
                   onClick={handleReviewClick}
                   disabled={!editorCode.trim() || isStreaming}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    padding: '8px 16px',
-                    background: editorCode.trim() && !isStreaming ? '#1e3a8a' : '#334155',
-                    border: '1px solid #334155',
-                    borderRadius: 6,
-                    color: editorCode.trim() && !isStreaming ? '#93c5fd' : '#64748b',
-                    fontSize: 13,
-                    fontWeight: 500,
-                    cursor: editorCode.trim() && !isStreaming ? 'pointer' : 'not-allowed',
-                    transition: 'all 0.2s',
-                  }}
                 >
                   <CheckCircle size={14} />
-                  <span>Submit for Review</span>
+                  <span>Submit for review</span>
                 </button>
               </div>
             </div>
-          </div>
+          </section>
         )}
-        <SplitPane editorOpen={editorOpen} onToggle={() => setEditorOpen((o) => !o)} />
-        <div className="chat-panel">
+
+        {editorOpen && <SplitPane value={editorWidth} onResize={setEditorWidth} />}
+
+        <section className="chat-panel" aria-label="Interview conversation">
           <div className="panel-header">
-            <Bot size={18} style={{ marginRight: 6 }} />
-            <span>Interview Chat</span>
-            {sessionId && (
-              <span style={{ marginLeft: 'auto', fontSize: 11, color: '#64748b', background: '#1e293b', padding: '2px 8px', borderRadius: 4 }}>
-                Session: {sessionId.slice(-8)}
+            <div className="panel-title">
+              <span className="panel-icon"><Bot size={15} /></span>
+              <span>
+                <strong>Interview room</strong>
+                <small>{isStreaming ? 'Response streaming' : 'Live adaptive session'}</small>
               </span>
+            </div>
+            {sessionId && (
+              <span className="session-id"><small>Session</small>{sessionId.slice(-8)}</span>
             )}
           </div>
           <ChatWindow
             messages={messages}
             isStreaming={isStreaming}
+            speakingMessageId={speakingMessageId}
             onSend={handleSend}
           />
-        </div>
-      </div>
+        </section>
+      </main>
     </div>
   );
 }

@@ -1,80 +1,157 @@
-import React from 'react';
-import { Send, Bot, MessageCircle } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Bot, MessageCircle, Send } from 'lucide-react';
 
-export default function ChatWindow({ messages, isStreaming, onSend }) {
-  const inputRef = React.useRef(null);
+const STARTER_PROMPTS = [
+  'Start my technical interview',
+  'Can we start the coding round?',
+];
 
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    const input = inputRef.current;
-    const text = input.value.trim();
-    if (!text) return;
+export default function ChatWindow({ messages, isStreaming, speakingMessageId, onSend }) {
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef(null);
+  const messageListRef = useRef(null);
+  const hasMessages = Boolean(messages?.length);
+
+  const focusComposer = useCallback(() => {
+    inputRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    if (isStreaming) return undefined;
+    const frame = requestAnimationFrame(focusComposer);
+    return () => cancelAnimationFrame(frame);
+  }, [focusComposer, hasMessages, isStreaming, messages?.length]);
+
+  useEffect(() => {
+    const list = messageListRef.current;
+    if (!list) return;
+    list.scrollTo({
+      top: list.scrollHeight,
+      behavior: isStreaming ? 'auto' : 'smooth',
+    });
+  }, [isStreaming, messages]);
+
+  const submitMessage = useCallback((value) => {
+    const text = value.trim();
+    if (!text || isStreaming) return;
+    setDraft('');
+    if (inputRef.current) inputRef.current.style.height = 'auto';
     onSend(text);
-    input.value = '';
+  }, [isStreaming, onSend]);
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    submitMessage(draft);
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit(e);
+  const handleKeyDown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      submitMessage(draft);
     }
   };
 
-  if (!messages || messages.length === 0) {
-    return (
-      <div className="chat-content">
-        <div className="empty-state">
-          <MessageCircle size={26} style={{ marginBottom: 8 }} />
-          <p>Start the interview — type a message below to begin.</p>
-        </div>
-        <form onSubmit={handleSubmit} className="chat-input-area">
-          <div className="chat-input-wrapper">
-            <input
-              ref={inputRef}
-              placeholder="Say hello to your interviewer..."
-              disabled={isStreaming}
-              onKeyDown={handleKeyDown}
-            />
-            <button type="submit" disabled={isStreaming || !inputRef.current?.value.trim()}>
-              <Send size={18} />
-            </button>
-          </div>
-          <div className="hint">
-            Tip: write code in the Monaco Editor on the left, then chat — the interviewer can see
-            your code and respond to it.
-          </div>
-        </form>
-      </div>
-    );
-  }
+  const handleDraftChange = (event) => {
+    setDraft(event.target.value);
+    event.target.style.height = 'auto';
+    event.target.style.height = `${Math.min(event.target.scrollHeight, 112)}px`;
+  };
 
   return (
-    <div className="chat-content">
-      {messages.map((msg) => (
-        <div
-          key={msg.id}
-          className={`message ${msg.role} ${msg.streaming ? 'streaming' : ''}`}
-        >
-          {msg.role === 'assistant' && <Bot size={16} style={{ marginRight: 6 }} />}
-          {msg.content}
-          {msg.streaming && <span className="cursor"></span>}
-        </div>
-      ))}
+    <div className="chat-content" aria-busy={isStreaming}>
+      <div className="message-list" ref={messageListRef} aria-live="polite">
+        {!hasMessages ? (
+          <section className="empty-state">
+            <div className="empty-state-icon" aria-hidden="true">
+              <MessageCircle size={22} />
+            </div>
+            <p className="eyebrow">Adaptive interview</p>
+            <h1>Ready when you are.</h1>
+            <p className="empty-state-copy">
+              Begin with an introduction or jump directly into a focused coding round.
+            </p>
+            <div className="starter-prompts" aria-label="Suggested messages">
+              {STARTER_PROMPTS.map((prompt) => (
+                <button key={prompt} type="button" onClick={() => submitMessage(prompt)}>
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </section>
+        ) : (
+          messages.map((message) => {
+            const isAssistant = message.role === 'assistant';
+            const isError = message.content?.includes('[Connection error:')
+              || message.content?.includes('[Review error:');
+            const messageIsSpeaking = isAssistant && message.id === speakingMessageId;
+
+            return (
+              <article
+                key={message.id}
+                className={`message-row ${message.role} ${message.streaming ? 'streaming' : ''} ${messageIsSpeaking ? 'is-speaking' : ''}`}
+              >
+                {isAssistant && (
+                  <div className="message-avatar" aria-hidden="true">
+                    <Bot size={15} />
+                  </div>
+                )}
+                <div className="message-stack">
+                  <div className="message-meta">
+                    <span className="message-author">{isAssistant ? 'Interviewer' : 'You'}</span>
+                    {messageIsSpeaking && (
+                      <span className="speech-live" aria-label="This response is being spoken">
+                        <i />
+                        <i />
+                        <i />
+                        <em>Speaking</em>
+                      </span>
+                    )}
+                  </div>
+                  <div className={`message ${message.role} ${isError ? 'error' : ''}`}>
+                    {message.content ? (
+                      <span className="message-copy">{message.content}</span>
+                    ) : message.streaming ? (
+                      <span className="typing-indicator" aria-label="Interviewer is responding">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                    ) : null}
+                    {message.streaming && message.content && <span className="cursor" />}
+                  </div>
+                </div>
+              </article>
+            );
+          })
+        )}
+      </div>
+
       <form onSubmit={handleSubmit} className="chat-input-area">
-        <div className="chat-input-wrapper">
-          <input
+        <div className={`chat-input-wrapper ${isStreaming ? 'is-streaming' : ''}`}>
+          <textarea
             ref={inputRef}
-            placeholder="Type your answer..."
-            disabled={isStreaming}
+            autoFocus
+            rows={1}
+            value={draft}
+            placeholder={hasMessages ? 'Type your answer…' : 'Introduce yourself…'}
+            readOnly={isStreaming}
+            aria-label="Message the interviewer"
+            aria-disabled={isStreaming}
+            onChange={handleDraftChange}
             onKeyDown={handleKeyDown}
           />
-          <button type="submit" disabled={isStreaming || !inputRef.current?.value.trim()}>
-            <Send size={18} />
+          <button
+            type="submit"
+            disabled={isStreaming || !draft.trim()}
+            aria-label="Send message"
+            title="Send message"
+          >
+            <Send size={17} />
           </button>
         </div>
-        <div className="hint">
-          Tip: write code in the Monaco Editor on the left, then chat — the interviewer can see
-          your code and respond to it.
+        <div className="composer-meta">
+          <span>{isStreaming ? 'Interviewer is responding…' : 'Enter to send · Shift + Enter for a new line'}</span>
+          <span className="composer-status"><i /> AG-UI connected</span>
         </div>
       </form>
     </div>

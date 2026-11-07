@@ -1,83 +1,70 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
-export default function SplitPane({ editorOpen, onToggle }) {
+const MIN_EDITOR_WIDTH = 32;
+const MAX_EDITOR_WIDTH = 72;
+
+export default function SplitPane({ value, onResize }) {
   const [dragging, setDragging] = useState(false);
-  const [editorFlex, setEditorFlex] = useState(50);
-  const containerRef = useRef(null);
+  const cleanupRef = useRef(null);
 
-  const minEditor = 25;
-  const maxEditor = 80;
-
-  const startDrag = useCallback((e) => {
-    setDragging(true);
+  const stopDragging = useCallback(() => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    setDragging(false);
+    document.body.classList.remove('is-resizing');
   }, []);
 
-  useEffect(() => {
-    if (!dragging) return;
-    const move = (e) => {
-      const rect = containerRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      let pct = (x / rect.width) * 100;
-      pct = Math.min(Math.max(pct, minEditor), maxEditor);
-      setEditorFlex(pct);
+  const startDragging = useCallback((event) => {
+    event.preventDefault();
+    const container = event.currentTarget.parentElement;
+    if (!container) return;
+
+    const move = (pointerEvent) => {
+      const rect = container.getBoundingClientRect();
+      const rawWidth = ((pointerEvent.clientX - rect.left) / rect.width) * 100;
+      onResize(Math.min(Math.max(rawWidth, MIN_EDITOR_WIDTH), MAX_EDITOR_WIDTH));
     };
-    const up = () => setDragging(false);
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    return () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
+
+    const finish = () => stopDragging();
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish, { once: true });
+    cleanupRef.current = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
     };
-  }, [dragging]);
+    setDragging(true);
+    document.body.classList.add('is-resizing');
+  }, [onResize, stopDragging]);
+
+  const handleKeyDown = (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+
+    if (event.key === 'Home') onResize(MIN_EDITOR_WIDTH);
+    else if (event.key === 'End') onResize(MAX_EDITOR_WIDTH);
+    else onResize(Math.min(Math.max(
+      value + (event.key === 'ArrowLeft' ? -2 : 2),
+      MIN_EDITOR_WIDTH,
+    ), MAX_EDITOR_WIDTH));
+  };
+
+  useEffect(() => stopDragging, [stopDragging]);
 
   return (
-    <>
-      <div
-        ref={containerRef}
-        className="split-handle"
-        onMouseDown={startDrag}
-        title="Drag to resize panels"
-        style={{
-          flex: '0 0 8px',
-          background: dragging ? '#3b82f6' : '#1e293b',
-          cursor: 'ew-resize',
-          userSelect: 'none',
-        }}
-      />
-      <button
-        className="toggle-btn"
-        onClick={onToggle}
-        title={editorOpen ? 'Hide editor (chat only)' : 'Show editor'}
-        style={{
-          position: 'absolute',
-          left: editorOpen ? '50%' : 'calc(100% - 40px)',
-          top: '50%',
-          transform: 'translate(-50%, -50%)',
-          zIndex: 20,
-          background: '#0b1120',
-          border: '1px solid #334155',
-          color: '#e2e8f0',
-          padding: '6px 10px',
-          borderRadius: '6px',
-          cursor: 'pointer',
-          fontSize: '0.8rem',
-          opacity: editorOpen ? 0.7 : 1,
-          pointerEvents: editorOpen ? 'auto' : 'auto',
-        }}
-      >
-        {editorOpen ? (
-          <>
-            <Minimize2 size={14} />
-            <span style={{ marginLeft: 4, fontSize: '0.75rem' }}>Hide Editor</span>
-          </>
-        ) : (
-          <>
-            <Maximize2 size={14} />
-            <span style={{ marginLeft: 4, fontSize: '0.75rem' }}>Show Editor</span>
-          </>
-        )}
-      </button>
-    </>
+    <div
+      className={`split-handle ${dragging ? 'is-dragging' : ''}`}
+      role="separator"
+      aria-label="Resize code and interview panels"
+      aria-orientation="vertical"
+      aria-valuemin={MIN_EDITOR_WIDTH}
+      aria-valuemax={MAX_EDITOR_WIDTH}
+      aria-valuenow={Math.round(value)}
+      tabIndex={0}
+      title="Drag or use arrow keys to resize panels"
+      onPointerDown={startDragging}
+      onKeyDown={handleKeyDown}
+    >
+      <span aria-hidden="true" />
+    </div>
   );
 }

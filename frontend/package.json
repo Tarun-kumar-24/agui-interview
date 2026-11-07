@@ -10,14 +10,18 @@
     "test": "node --test src/*.test.js"
   },
   "dependencies": {
+    "@ag-ui/client": "^1.0.3",
+    "lucide-react": "^0.453.0",
+    "monaco-editor": "^0.52.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "monaco-editor": "^0.52.0",
-    "react-monaco-editor": "^0.56.0",
-    "lucide-react": "^0.453.0"
+    "react-monaco-editor": "^0.56.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
     "vite": "^5.4.0"
+  },
+  "overrides": {
+    "zod": "4.6.6"
   }
 }

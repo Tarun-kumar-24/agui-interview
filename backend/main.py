@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import re
@@ -7,10 +8,12 @@ from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 
 import httpx
+import edge_tts
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from ag_ui.core import (
     EventType,
@@ -18,6 +21,7 @@ from ag_ui.core import (
     RunErrorEvent,
     RunFinishedEvent,
     RunStartedEvent,
+    StateSnapshotEvent,
     TextMessageChunkEvent,
     ToolCallChunkEvent,
 )
@@ -39,9 +43,33 @@ load_dotenv(os.path.join(backend_dir, ".env"))
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODELS = (
+    [
+        model.strip()
+        for model in os.getenv("OPENAI_MODELS", OPENAI_MODEL).split(",")
+        if model.strip()
+    ]
+    or [OPENAI_MODEL]
+)
+EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-AndrewMultilingualNeural")
+EDGE_TTS_RATE = os.getenv("EDGE_TTS_RATE", "+8%")
+EDGE_TTS_VOLUME = os.getenv("EDGE_TTS_VOLUME", "+0%")
+
+EDGE_TTS_VOICES = {
+    "en-US-AndrewMultilingualNeural",
+    "en-US-AvaMultilingualNeural",
+    "en-US-BrianMultilingualNeural",
+    "en-US-EmmaMultilingualNeural",
+}
+
+
+class TTSRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=800)
+    voice: Optional[str] = None
 
 http_client = httpx.AsyncClient(timeout=60.0)
 session_locks: dict[str, asyncio.Lock] = {}
+tts_semaphore = asyncio.Semaphore(4)
 app = FastAPI(title="AG-UI Interview Agent")
 app.add_middleware(
     CORSMiddleware,
@@ -157,6 +185,23 @@ CURRENT STATE:
 - Interview status: {status}
 - Selected language: {language}
 """
+
+
+def _model_request_fields(require_parameters: bool = False) -> dict:
+    """Use OpenRouter's cross-model failover while retaining generic OpenAI compatibility."""
+    if "openrouter.ai" not in OPENAI_BASE_URL or len(OPENAI_MODELS) == 1:
+        return {"model": OPENAI_MODELS[0]}
+
+    provider = {
+        "allow_fallbacks": True,
+        "sort": {"by": "latency", "partition": "none"},
+    }
+    if require_parameters:
+        provider["require_parameters"] = True
+    return {
+        "models": OPENAI_MODELS,
+        "provider": provider,
+    }
 
 
 def _message_value(message, field: str, default=""):
@@ -315,7 +360,7 @@ def _extract_json_object(text: str) -> dict:
 
 async def _json_completion(prompt: str, temperature: float) -> dict:
     payload = {
-        "model": OPENAI_MODEL,
+        **_model_request_fields(require_parameters=True),
         "messages": [{"role": "system", "content": prompt}],
         "stream": False,
         "temperature": temperature,
@@ -566,11 +611,16 @@ def _event_response(
             )
             return
         yield encoder.encode(
+            StateSnapshotEvent(
+                type=EventType.STATE_SNAPSHOT,
+                snapshot=final_state,
+            )
+        )
+        yield encoder.encode(
             RunFinishedEvent(
                 type=EventType.RUN_FINISHED,
                 thread_id=input_data.thread_id,
                 run_id=input_data.run_id,
-                state=final_state,
             )
         )
 
@@ -842,7 +892,7 @@ def _theoretical_chat_response(input_data: RunAgentInput, session) -> StreamingR
                 )
             )
             payload = {
-                "model": OPENAI_MODEL,
+                **_model_request_fields(),
                 "messages": messages,
                 "stream": True,
                 "temperature": 0.7,
@@ -886,11 +936,16 @@ def _theoretical_chat_response(input_data: RunAgentInput, session) -> StreamingR
             if "are you comfortable starting the coding round now" in assistant_text.lower():
                 session.coding_confirmation_pending = True
             yield encoder.encode(
+                StateSnapshotEvent(
+                    type=EventType.STATE_SNAPSHOT,
+                    snapshot=_state_payload(session),
+                )
+            )
+            yield encoder.encode(
                 RunFinishedEvent(
                     type=EventType.RUN_FINISHED,
                     thread_id=input_data.thread_id,
                     run_id=input_data.run_id,
-                    state=_state_payload(session),
                 )
             )
         except Exception as error:
@@ -1002,6 +1057,103 @@ async def _run_agent_locked(input_data: RunAgentInput, session) -> StreamingResp
         return await _handle_coding_chat(input_data, session)
 
     return _theoretical_chat_response(input_data, session)
+
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "ok",
+        "llm_model": OPENAI_MODELS[0],
+        "tts_provider": "edge-tts",
+        "tts_voice": EDGE_TTS_VOICE,
+    }
+
+
+@app.post("/tts")
+async def synthesize_speech(tts_request: TTSRequest):
+    text = re.sub(r"\s+", " ", tts_request.text).strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Speech text cannot be empty.")
+
+    voice = tts_request.voice or EDGE_TTS_VOICE
+    if voice not in EDGE_TTS_VOICES:
+        raise HTTPException(status_code=400, detail="Unsupported Edge TTS voice.")
+
+    communicate = edge_tts.Communicate(
+        text,
+        voice,
+        rate=EDGE_TTS_RATE,
+        volume=EDGE_TTS_VOLUME,
+    )
+
+    async def audio_stream() -> AsyncGenerator[bytes, None]:
+        async with tts_semaphore:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio" and chunk.get("data"):
+                    yield chunk["data"]
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type="audio/mpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-TTS-Voice": voice,
+        },
+    )
+
+
+@app.post("/tts/segment")
+async def synthesize_speech_segment(tts_request: TTSRequest):
+    text = re.sub(r"\s+", " ", tts_request.text).strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Speech text cannot be empty.")
+
+    voice = tts_request.voice or EDGE_TTS_VOICE
+    if voice not in EDGE_TTS_VOICES:
+        raise HTTPException(status_code=400, detail="Unsupported Edge TTS voice.")
+
+    communicate = edge_tts.Communicate(
+        text,
+        voice,
+        rate=EDGE_TTS_RATE,
+        volume=EDGE_TTS_VOLUME,
+        boundary="WordBoundary",
+    )
+    audio = bytearray()
+    boundaries = []
+
+    try:
+        async with tts_semaphore:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio" and chunk.get("data"):
+                    audio.extend(chunk["data"])
+                elif chunk["type"] == "WordBoundary":
+                    boundaries.append(
+                        {
+                            "text": chunk.get("text", ""),
+                            "offsetMs": round(float(chunk.get("offset", 0)) / 10_000, 2),
+                            "durationMs": round(float(chunk.get("duration", 0)) / 10_000, 2),
+                        }
+                    )
+    except Exception as error:
+        print(f"Edge TTS synthesis failed: {error}")
+        raise HTTPException(status_code=502, detail="Speech synthesis is temporarily unavailable.") from error
+
+    if not audio:
+        raise HTTPException(status_code=502, detail="Speech synthesis returned no audio.")
+
+    duration_ms = max(
+        (boundary["offsetMs"] + boundary["durationMs"] for boundary in boundaries),
+        default=0,
+    )
+    return {
+        "audio": base64.b64encode(audio).decode("ascii"),
+        "mimeType": "audio/mpeg",
+        "boundaries": boundaries,
+        "durationMs": round(duration_ms, 2),
+        "voice": voice,
+    }
 
 
 @app.post("/")

@@ -50,13 +50,13 @@ export default function MonacoEditorComponent({
         boxSizing: 'border-box',
         height: '100%',
         overflow: 'auto',
-        padding: '10px 16px',
-        borderBottom: '1px solid #334155',
-        background: '#111827',
-        color: language === 'python' ? '#7dd3a7' : '#79c0ff',
-        fontFamily: 'Consolas, "Courier New", monospace',
-        fontSize: '13px',
-        lineHeight: '20px',
+        padding: '12px 18px',
+        borderBottom: '1px solid var(--border-strong)',
+        background: 'var(--surface-code-note)',
+        color: 'var(--accent-soft)',
+        fontFamily: 'var(--font-mono)',
+        fontSize: '12px',
+        lineHeight: '19px',
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
       });
@@ -73,7 +73,6 @@ export default function MonacoEditorComponent({
   const editorDidMount = useCallback((editorInstance, monacoInstance) => {
     editorRef.current = editorInstance;
     monacoRef.current = monacoInstance;
-    editorInstance.focus();
     renderQuestionZone();
   }, [renderQuestionZone]);
 
@@ -121,56 +120,43 @@ export default function MonacoEditorComponent({
   }, []);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
-      <div className="language-selector" style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '8px 12px',
-        background: '#0b1120',
-        borderBottom: '1px solid #1e293b',
-        flexShrink: 0,
-      }}>
-        <Code2 size={14} style={{ color: '#64748b' }} />
-        <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 500 }}>Language</span>
+    <div className="monaco-shell" style={{ height }}>
+      <div className="language-selector">
+        <Code2 size={14} aria-hidden="true" />
+        <label htmlFor="editor-language">Language</label>
         <select
+          id="editor-language"
           value={language}
           onChange={(event) => handleLanguageChange(event.target.value)}
-          style={{
-            flex: 1,
-            maxWidth: 180,
-            padding: '6px 32px 6px 10px',
-            background: '#020617',
-            border: '1px solid #334155',
-            borderRadius: 4,
-            color: '#f8fafc',
-            fontSize: 12,
-            cursor: 'pointer',
-          }}
         >
           {LANGUAGES.map(({ id, label }) => (
             <option key={id} value={id}>{label}</option>
           ))}
         </select>
       </div>
-      <MonacoEditor
-        height="100%"
-        width="100%"
-        language={MONACO_LANG_MAP[language] || language}
-        theme="vs-dark"
-        value={value ?? ''}
-        onChange={handleChange}
-        editorDidMount={editorDidMount}
-        options={{
-          minimap: { enabled: true },
-          fontSize: 14,
-          wordWrap: 'on',
-          automaticLayout: true,
-          lineNumbers: 'on',
-          scrollBeyondLastLine: false,
-          stickyScroll: { enabled: true },
-        }}
-      />
+      <div className="monaco-editor-frame">
+        <MonacoEditor
+          height="100%"
+          width="100%"
+          language={MONACO_LANG_MAP[language] || language}
+          theme="vs"
+          value={value ?? ''}
+          onChange={handleChange}
+          editorDidMount={editorDidMount}
+          options={{
+            minimap: { enabled: true },
+            fontFamily: 'IBM Plex Mono, SFMono-Regular, Consolas, monospace',
+            fontSize: 13,
+            lineHeight: 21,
+            padding: { top: 10, bottom: 10 },
+            wordWrap: 'on',
+            automaticLayout: true,
+            lineNumbers: 'on',
+            scrollBeyondLastLine: false,
+            stickyScroll: { enabled: true },
+          }}
+        />
+      </div>
     </div>
   );
 }
